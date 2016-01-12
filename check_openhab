@@ -1,0 +1,131 @@
+#!/usr/bin/python
+
+import json
+import re
+import sys
+import urllib
+import urllib2
+
+from optparse import OptionParser
+
+RC_OK   = 0
+RC_WARN = 1
+RC_CRIT = 2
+RC_UNKN = 3
+
+parser = OptionParser()
+parser.add_option('-I', '--item', help='The item to check.  Required.')
+parser.add_option('-H', '--hostname', default='localhost', help='Hostname of the OpenHAB instance.  Defaults to localhost.')
+parser.add_option('-p', '--port', type='int', default=8080, help='Port number of the OpenHAB instance.  Defaults to 8080.')
+parser.add_option('-S', '--ssl', action='store_true', help='Use SSL when connecting.  Default is not to use SSL.')
+parser.add_option('-a', '--authorization', help='username:password pair to use when connecting.')
+parser.add_option('-u', '--base-url', default='/rest', help='Base path for the REST API.  Defaults to /rest.')
+parser.add_option('-w', '--warn', help='low:high pair of integers to set thresholds for a WARNING status.  Either integer may be absent to indicate no threshold in that direction.')
+parser.add_option('-c', '--crit', help='low:high pair of integers to set thresholds for a CRITICAL status.  Either integer may be absent to indicate no threshold in that direction.')
+parser.add_option('-r', '--regex', help='Regular expression to search for in string values.  Returns CRITICAL if pattern is not found.')
+parser.add_option(      '--invert-regex', action='store_true', help='Reverses the return values for the --regex parameter: CRITICAL if pattern *is* found, OK if it isn\'t.')
+parser.add_option(      '--uninitialized-is-error', action='store_true', help='Indicates that uninitialized values should always be considered CRITICAL.  By default, uninitialized values are always OK.')
+parser.add_option('-v', '--verbose', action='store_true')
+(options, args) = parser.parse_args()
+
+if options.item is None:
+    print 'No item given.'
+    sys.exit(RC_UNKN)
+
+def split_threshold(value, level):
+    if value is None:
+        return (None, None)
+    items = value.split(':')
+    if len(items) != 2:
+        print 'Malformed %s value: %s' % (level, value)
+        sys.exit(RC_UNKN)
+    try:
+        return [ None if i == '' else float(i) for i in items ]
+    except ValueError:
+        print 'Non-numeric value passed as %s parameter: %s' % (level, value)
+        sys.exit(RC_UNKN)
+        
+warn_low, warn_high = split_threshold(options.warn, 'warn')
+crit_low, crit_high = split_threshold(options.crit, 'crit')
+
+if options.regex is not None:
+    try:
+        compiled_regex = re.compile(options.regex)
+    except:
+        print 'Unable to compile regex:', options.regex
+        sys.exit(RC_UNKN)
+
+item_url = '%s://%s:%d%s/items/%s' % \
+           ('https' if options.ssl else 'http', options.hostname, options.port, options.base_url, options.item)
+if options.verbose:
+    print >>sys.stderr, '# %s' % item_url
+
+password_manager = urllib2.HTTPPasswordMgrWithDefaultRealm()
+if options.authorization is not None:
+    auth_params = options.authorization.split(':')
+    if len(auth_params) != 2:
+        print 'Authorization parameters not in "username:password" format.'
+        sys.exit(RC_UNKN)
+    password_manager.add_password(None, item_url, auth_params[0], auth_params[1])
+auth_handler = urllib2.HTTPBasicAuthHandler(password_manager)
+url_opener = urllib2.build_opener(auth_handler)
+urllib2.install_opener(url_opener)
+    
+item_request = urllib2.Request(item_url)
+item_request.add_header('Accept', 'application/json')
+try:
+    item_raw = urllib2.urlopen(item_request)
+except urllib2.HTTPError, e:
+    if e.code == 404:
+        print 'Item "%s" does not exist.' % options.item
+        sys.exit(RC_UNKN)
+    print 'Exception fetching item data:', e
+    sys.exit(RC_UNKN)
+except Exception, e:
+    print 'Exception fetching item data:', e
+    sys.exit(RC_UNKN)
+
+item_json = json.load(item_raw)
+if options.verbose:
+    print '# %s' % json.dumps(item_json)
+
+if item_json['state'] == 'Uninitialized':
+    print '%s is uninitialized.' % item_json['name']
+    if options.uninitialized_is_error:
+        sys.exit(RC_CRIT)
+    else:
+        sys.exit(RC_OK)
+    
+if options.warn is not None or options.crit is not None:
+    try:
+        state = float(item_json['state'])
+    except ValueError:
+        print 'Numeric thresholds given for non-numeric state: "%s"' % item_json['state']
+        sys.exit(RC_UNKN)
+    if crit_low is not None and state <= crit_low:
+        print '%s state (%f) is less than %f' % (item_json['name'], state, crit_low)
+        sys.exit(RC_CRIT)
+    elif crit_high is not None and crit_high <= state:
+        print '%s state (%f) is greater than %f' % (item_json['name'], state, crit_high)
+        sys.exit(RC_CRIT)
+    elif warn_low is not None and state <= warn_low:
+        print '%s state (%f) is less than %f' % (item_json['name'], state, warn_low)
+        sys.exit(RC_WARN)
+    elif warn_high is not None and warn_high <= state:
+        print '%s state (%f) is greater than %f' % (item_json['name'], state, warn_high)
+        sys.exit(RC_WARN)
+
+if options.regex is not None:
+    if options.invert_regex:
+        rc_match, rc_nomatch = RC_CRIT, RC_OK
+    else:
+        rc_match, rc_nomatch = RC_OK, RC_CRIT
+    if compiled_regex.search(item_json['state']):
+        print '%s regex "%s" matched state: %s' % (item_json['name'], options.regex, item_json['state'])
+        sys.exit(rc_match)
+    else:
+        print '%s regex "%s" did not match state: %s' % (item_json['name'], options.regex, item_json['state'])
+        sys.exit(rc_nomatch)
+
+print '%s state within bounds: %s' % (item_json['name'], item_json['state'])
+sys.exit(RC_OK)
