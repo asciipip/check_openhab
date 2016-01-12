@@ -1,5 +1,5 @@
-check_blue_iris
-===============
+check_openhab
+=============
 
 This is a very simple Nagios plugin that checks on items in an [OpenHAB][]
 instance.  It uses OpenHAB's REST API.
