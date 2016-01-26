@@ -14,8 +14,8 @@ string and match patterns against it.
 Installation
 ------------
 
-The plugin requires Python version 2.6 or later on the testing system.  It
-shouldn't require anything else.
+The plugin requires Python version 2.6 or later on the testing system and
+python-dateutil.
 
 
 Usage
