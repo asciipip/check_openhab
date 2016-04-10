@@ -40,7 +40,7 @@ parser.add_option('-r', '--regex', help='Regular expression to search for in str
 parser.add_option(      '--invert-regex', action='store_true', help='Reverses the return values for the --regex parameter: CRITICAL if pattern *is* found, OK if it isn\'t.')
 parser.add_option(      '--warn-time', help='low:high pair of timestamps or time periods which constitute WARNING thresholds for DateTime items.  See below for information on formatting.')
 parser.add_option(      '--crit-time', help='low:high pair of timestamps or time periods which constitute CRITICAL thresholds for DateTime items.  See below for information on formatting.')
-parser.add_option(      '--uninitialized-is-error', action='store_true', help='Indicates that uninitialized values should always be considered CRITICAL.  By default, uninitialized values are always OK.')
+parser.add_option('-U', '--uninitialized-status', choices=('OK', 'WARNING', 'CRITICAL', 'UNKNOWN'), default='UNKNOWN', help='The status that should be returned if the item\'s state is "Uninitialized".  Defaults to UNKNOWN.')
 parser.add_option('-v', '--verbose', action='store_true')
 
 iso8601_duration_re = \
@@ -73,6 +73,15 @@ def split_threshold(value, level, convert):
     except:
         print 'Invalid value passed as %s parameter: %s' % (level, value)
         sys.exit(RC_UNKN)
+
+def check_limits(state, low, high, name, return_code):
+    if low is not None and state <= low:
+        print '%s state (%s) is less than %s' % (name, state, low)
+        sys.exit(return_code)
+    elif high is not None and high <= state:
+        print '%s state (%s) is greater than %s' % (name, state, high)
+        sys.exit(return_code)
+
         
 if __name__ == '__main__':
     (options, args) = parser.parse_args()
@@ -132,12 +141,18 @@ if __name__ == '__main__':
     if options.verbose:
         print '# %s' % json.dumps(item_json)
     
-    if item_json['state'] == 'Uninitialized':
+    if item_json['state'] in ('Uninitialized', 'Undefined'):
         print '%s is uninitialized.' % item_json['name']
-        if options.uninitialized_is_error:
-            sys.exit(RC_CRIT)
-        else:
+        if options.uninitialized_status == 'OK':
             sys.exit(RC_OK)
+        elif options.uninitialized_status == 'WARNING':
+            sys.exit(RC_WARN)
+        elif options.uninitialized_status == 'CRITICAL':
+            sys.exit(RC_CRIT)
+        elif options.uninitialized_status == 'UNKNOWN':
+            sys.exit(RC_UNKN)
+        else:
+            sys.exit(RC_UNKN)
         
     if options.warn is not None or options.crit is not None:
         try:
@@ -145,18 +160,8 @@ if __name__ == '__main__':
         except ValueError:
             print 'Numeric thresholds given for non-numeric state: "%s"' % item_json['state']
             sys.exit(RC_UNKN)
-        if crit_low is not None and state <= crit_low:
-            print '%s state (%f) is less than %f' % (item_json['name'], state, crit_low)
-            sys.exit(RC_CRIT)
-        elif crit_high is not None and crit_high <= state:
-            print '%s state (%f) is greater than %f' % (item_json['name'], state, crit_high)
-            sys.exit(RC_CRIT)
-        elif warn_low is not None and state <= warn_low:
-            print '%s state (%f) is less than %f' % (item_json['name'], state, warn_low)
-            sys.exit(RC_WARN)
-        elif warn_high is not None and warn_high <= state:
-            print '%s state (%f) is greater than %f' % (item_json['name'], state, warn_high)
-            sys.exit(RC_WARN)
+        check_limits(state, crit_low, crit_high, item_json['name'], RC_CRIT)
+        check_limits(state, warn_low, warn_high, item_json['name'], RC_WARN)
     
     if options.warn_time is not None or options.crit_time is not None:
         try:
@@ -164,18 +169,8 @@ if __name__ == '__main__':
         except ValueError:
             print 'Time thresholds given for non-time state: "%s"' % item_json['state']
             sys.exit(RC_UNKN)
-        if crit_time_low is not None and state <= crit_time_low:
-            print '%s state (%s) is less than %s' % (item_json['name'], state, crit_time_low)
-            sys.exit(RC_CRIT)
-        elif crit_time_high is not None and crit_time_high <= state:
-            print '%s state (%s) is greater than %s' % (item_json['name'], state, crit_time_high)
-            sys.exit(RC_CRIT)
-        elif warn_time_low is not None and state <= warn_time_low:
-            print '%s state (%s) is less than %s' % (item_json['name'], state, warn_time_low)
-            sys.exit(RC_WARN)
-        elif warn_time_high is not None and warn_time_high <= state:
-            print '%s state (%s) is greater than %s' % (item_json['name'], state, warn_time_high)
-            sys.exit(RC_WARN)
+        check_limits(state, crit_time_low, crit_time_high, item_json['name'], RC_CRIT)
+        check_limits(state, warn_time_low, warn_time_high, item_json['name'], RC_WARN)
     
     if options.regex is not None:
         if options.invert_regex:
