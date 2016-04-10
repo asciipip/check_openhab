@@ -18,7 +18,7 @@ RC_CRIT = 2
 RC_UNKN = 3
 
 options_epilog = """The warn, crit, warn-time, and crit-time parameters
-take a pair of values separated by a colon.  Either side of the clolon may
+take a pair of values separated by a colon.  Either side of the colon may
 be empty, which implies no threshold in that direction.  e.g. "1:2"
 indicates that the acceptable values for the check range from 1 to 2,
 inclusive.  ":5" gives an upper threshold of 5 and no lower threshold.
