@@ -40,6 +40,7 @@ parser.add_option('-r', '--regex', help='Regular expression to search for in str
 parser.add_option(      '--invert-regex', action='store_true', help='Reverses the return values for the --regex parameter: CRITICAL if pattern *is* found, OK if it isn\'t.')
 parser.add_option(      '--warn-time', help='low:high pair of timestamps or time periods which constitute WARNING thresholds for DateTime items.  See below for information on formatting.')
 parser.add_option(      '--crit-time', help='low:high pair of timestamps or time periods which constitute CRITICAL thresholds for DateTime items.  See below for information on formatting.')
+parser.add_option('-G', '--group', action='store_true', help='This item is a group; apply the checks to each group member individually.')
 parser.add_option('-U', '--uninitialized-status', choices=('OK', 'WARNING', 'CRITICAL', 'UNKNOWN'), default='UNKNOWN', help='The status that should be returned if the item\'s state is "Uninitialized".  Defaults to UNKNOWN.')
 parser.add_option('-v', '--verbose', action='store_true')
 
@@ -162,17 +163,22 @@ def check_item(item_json, thresholds, options):
         return (rc, '%s is uninitialized.' % item_json['name'])
 
     return thresholds.check(item_json['state'], item_json['name'])
-        
-if __name__ == '__main__':
-    (options, args) = parser.parse_args()
-    thresholds = Thresholds(options)
-    
-    if options.item is None:
-        print 'No item given.'
-        sys.exit(RC_UNKN)
-    
-    item_url = '%s://%s:%d%s/items/%s' % \
-               ('https' if options.ssl else 'http', options.hostname, options.port, options.base_url, options.item)
+
+def check_group(group_json, thresholds, options):
+    final_rc = RC_OK
+    final_messages = []
+    for i in group_json['members']:
+        if i['type'] == 'GroupItem':
+            rc, messages = check_group(fetch_item(i['link'], options), thresholds, options)
+            final_messages += messages
+        else:
+            rc, message = check_item(i, thresholds, options)
+            if rc != RC_OK:
+                final_messages.append(message)
+        final_rc = max(final_rc, rc)
+    return (final_rc, final_messages)
+
+def fetch_item(item_url, options):
     if options.verbose:
         print >>sys.stderr, '# %s' % item_url
     
@@ -193,7 +199,7 @@ if __name__ == '__main__':
         item_raw = urllib2.urlopen(item_request)
     except urllib2.HTTPError, e:
         if e.code == 404:
-            print 'Item "%s" does not exist.' % options.item
+            print 'Item "%s" does not exist.' % item_url
             sys.exit(RC_UNKN)
         print 'Exception fetching item data:', e
         sys.exit(RC_UNKN)
@@ -204,7 +210,31 @@ if __name__ == '__main__':
     item_json = json.load(item_raw)
     if options.verbose:
         print '# %s' % json.dumps(item_json)
+    return item_json
 
-    rc, message = check_item(item_json, thresholds, options)
-    print message
-    sys.exit(rc)
+if __name__ == '__main__':
+    (options, args) = parser.parse_args()
+    thresholds = Thresholds(options)
+    
+    if options.item is None:
+        print 'No item given.'
+        sys.exit(RC_UNKN)
+
+    item_url = '%s://%s:%d%s/items/%s' % \
+               ('https' if options.ssl else 'http', options.hostname, options.port, options.base_url, options.item)
+    item_json = fetch_item(item_url, options)
+
+    if options.group:
+        rc, messages = check_group(item_json, thresholds, options)
+        if len(messages) == 0:
+            final_message = 'All group members within bounds.'
+        elif len(messages) == 1:
+            final_message = messages[0]
+        else:
+            final_message = '%d problems in group %s.\n%s' % (len(messages), item_json['name'], '\n'.join(messages))
+        print final_message
+        sys.exit(rc)
+    else:
+        rc, message = check_item(item_json, thresholds, options)
+        print message
+        sys.exit(rc)
