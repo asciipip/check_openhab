@@ -76,37 +76,101 @@ def split_threshold(value, level, convert):
 
 def check_limits(state, low, high, name, return_code):
     if low is not None and state <= low:
-        print '%s state (%s) is less than %s' % (name, state, low)
-        sys.exit(return_code)
+        return (return_code, '%s state (%s) is less than %s' % (name, state, low))
     elif high is not None and high <= state:
-        print '%s state (%s) is greater than %s' % (name, state, high)
-        sys.exit(return_code)
+        return (return_code, '%s state (%s) is greater than %s' % (name, state, high))
+    else:
+        return (None, None)
 
+class Thresholds:
+    def __init__(self, options):
+        self.numeric_limits = options.warn is not None or options.crit is not None
+        if self.numeric_limits:
+            self.warn_low, self.warn_high = split_threshold(options.warn, 'warn', lambda i, f: float(i))
+            self.crit_low, self.crit_high = split_threshold(options.crit, 'crit', lambda i, f: float(i))
+            if options.verbose:
+                print >>sys.stderr, '# numeric thresholds: %s << %s < x > %s >> %s' % (self.crit_low, self.warn_low, self.warn_high, self.crit_high)
+
+        self.time_limits = options.warn_time is not None or options.crit_time is not None
+        if self.time_limits:
+            self.warn_time_low, self.warn_time_high = split_threshold(options.warn_time, 'warn-time', lambda i, f: parse_iso8601(i, f))
+            self.crit_time_low, self.crit_time_high = split_threshold(options.crit_time, 'crit-time', lambda i, f: parse_iso8601(i, f))
+            if options.verbose:
+                print >>sys.stderr, '# time thresholds: %s << %s < x > %s >> %s' % (self.crit_time_low, self.warn_time_low, self.warn_time_high, self.crit_time_high)
+
+        self.regex_limit = options.regex is not None
+        if self.regex_limit:
+            self.invert_regex = options.invert_regex
+            try:
+                self.compiled_regex = re.compile(options.regex)
+            except:
+                print 'Unable to compile regex:', options.regex
+                sys.exit(RC_UNKN)
+            
+    def check(self, state, name):
+        if self.numeric_limits:
+            try:
+                state_float = float(state)
+            except ValueError:
+                return (RC_UNKN, 'Numeric thresholds given for non-numeric state: "%s"' % state)
+            rc, message = check_limits(state_float, self.crit_low, self.crit_high, name, RC_CRIT)
+            if rc is not None:
+                return (rc, message)
+            rc, message = check_limits(state_float, self.warn_low, self.warn_high, name, RC_CRIT)
+            if rc is not None:
+                return (rc, message)
+
+        if self.time_limits:
+            try:
+                state_time = dateutil.parser.parse(state)
+            except ValueError:
+                return (RC_UNKN, 'Time thresholds given for non-time state: "%s"' % state)
+            rc, message = check_limits(state_time, self.crit_time_low, self.crit_time_high, name, RC_CRIT)
+            if rc is not None:
+                return (rc, message)
+            rc, message = check_limits(state_time, self.warn_time_low, self.warn_time_high, name, RC_WARN)
+            if rc is not None:
+                return (rc, message)
+
+        if self.regex_limit:
+            if self.invert_regex:
+                rc_match, rc_nomatch = RC_CRIT, RC_OK
+            else:
+                rc_match, rc_nomatch = RC_OK, RC_CRIT
+            if self.compiled_regex.search(state):
+                return (rc_match, '%s regex matched state: %s' % (name, state))
+            else:
+                return (rc_nomatch, '%s regex did not match state: %s' % (name, stat))
+        return (RC_OK, '%s state within bounds: %s' % (name, state))
+
+    
+def check_item(item_json, thresholds, options):
+    """Uses the values in OPTIONS to check on the status of ITEM.  Returns a
+    tuple: (RETURN_CODE, MESSAGE)"""
+    
+    if item_json['state'] in ('Uninitialized', 'Undefined'):
+        if options.uninitialized_status == 'OK':
+            rc = RC_OK
+        elif options.uninitialized_status == 'WARNING':
+            rc = RC_WARN
+        elif options.uninitialized_status == 'CRITICAL':
+            rc = RC_CRIT
+        elif options.uninitialized_status == 'UNKNOWN':
+            rc = RC_UNKN
+        else:
+            rc = RC_UNKN
+        return (rc, '%s is uninitialized.' % item_json['name'])
+
+    return thresholds.check(item_json['state'], item_json['name'])
         
 if __name__ == '__main__':
     (options, args) = parser.parse_args()
+    thresholds = Thresholds(options)
     
-    warn_low, warn_high = split_threshold(options.warn, 'warn', lambda i, f: float(i))
-    crit_low, crit_high = split_threshold(options.crit, 'crit', lambda i, f: float(i))
-    if options.verbose:
-        print >>sys.stderr, '# numeric thresholds: %s << %s < x > %s >> %s' % (crit_low, warn_low, warn_high, crit_high)
-
-    warn_time_low, warn_time_high = split_threshold(options.warn_time, 'warn-time', lambda i, f: parse_iso8601(i, f))
-    crit_time_low, crit_time_high = split_threshold(options.crit_time, 'crit-time', lambda i, f: parse_iso8601(i, f))
-    if options.verbose:
-        print >>sys.stderr, '# time thresholds: %s << %s < x > %s >> %s' % (crit_time_low, warn_time_low, warn_time_high, crit_time_high)
-
     if options.item is None:
         print 'No item given.'
         sys.exit(RC_UNKN)
     
-    if options.regex is not None:
-        try:
-            compiled_regex = re.compile(options.regex)
-        except:
-            print 'Unable to compile regex:', options.regex
-            sys.exit(RC_UNKN)
-
     item_url = '%s://%s:%d%s/items/%s' % \
                ('https' if options.ssl else 'http', options.hostname, options.port, options.base_url, options.item)
     if options.verbose:
@@ -140,50 +204,7 @@ if __name__ == '__main__':
     item_json = json.load(item_raw)
     if options.verbose:
         print '# %s' % json.dumps(item_json)
-    
-    if item_json['state'] in ('Uninitialized', 'Undefined'):
-        print '%s is uninitialized.' % item_json['name']
-        if options.uninitialized_status == 'OK':
-            sys.exit(RC_OK)
-        elif options.uninitialized_status == 'WARNING':
-            sys.exit(RC_WARN)
-        elif options.uninitialized_status == 'CRITICAL':
-            sys.exit(RC_CRIT)
-        elif options.uninitialized_status == 'UNKNOWN':
-            sys.exit(RC_UNKN)
-        else:
-            sys.exit(RC_UNKN)
-        
-    if options.warn is not None or options.crit is not None:
-        try:
-            state = float(item_json['state'])
-        except ValueError:
-            print 'Numeric thresholds given for non-numeric state: "%s"' % item_json['state']
-            sys.exit(RC_UNKN)
-        check_limits(state, crit_low, crit_high, item_json['name'], RC_CRIT)
-        check_limits(state, warn_low, warn_high, item_json['name'], RC_WARN)
-    
-    if options.warn_time is not None or options.crit_time is not None:
-        try:
-            state = dateutil.parser.parse(item_json['state'])
-        except ValueError:
-            print 'Time thresholds given for non-time state: "%s"' % item_json['state']
-            sys.exit(RC_UNKN)
-        check_limits(state, crit_time_low, crit_time_high, item_json['name'], RC_CRIT)
-        check_limits(state, warn_time_low, warn_time_high, item_json['name'], RC_WARN)
-    
-    if options.regex is not None:
-        if options.invert_regex:
-            rc_match, rc_nomatch = RC_CRIT, RC_OK
-        else:
-            rc_match, rc_nomatch = RC_OK, RC_CRIT
-        if compiled_regex.search(item_json['state']):
-            print '%s regex "%s" matched state: %s' % (item_json['name'], options.regex, item_json['state'])
-            sys.exit(rc_match)
-        else:
-            print '%s regex "%s" did not match state: %s' % (item_json['name'], options.regex, item_json['state'])
-            sys.exit(rc_nomatch)
-    
-    print '%s state within bounds: %s' % (item_json['name'], item_json['state'])
-    sys.exit(RC_OK)
-    
+
+    rc, message = check_item(item_json, thresholds, options)
+    print message
+    sys.exit(rc)
