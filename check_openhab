@@ -10,7 +10,7 @@ import urllib2
 import dateutil.parser
 import dateutil.relativedelta
 
-from optparse import OptionParser
+from optparse import OptionParser, OptionGroup
 
 RC_OK   = 0
 RC_WARN = 1
@@ -28,21 +28,25 @@ characters ("-" or ":").  Time-based thresholds can either be absolute
 dates or time periods (which start with the character "P").  Time periods
 are relative to the time the check is run."""
 parser = OptionParser(epilog=options_epilog)
-parser.add_option('-I', '--item', help='The item to check.  Required.')
+parser.add_option('-I', '--item', help='The item to check.  Either this or --thing is required.')
+parser.add_option('-T', '--thing', help='The thing to check. Will check thing''s status. Either this or --item is required.')
 parser.add_option('-H', '--hostname', default='localhost', help='Hostname of the OpenHAB instance.  Defaults to localhost.')
 parser.add_option('-p', '--port', type='int', default=8080, help='Port number of the OpenHAB instance.  Defaults to 8080.')
 parser.add_option('-S', '--ssl', action='store_true', help='Use SSL when connecting.  Default is not to use SSL.')
 parser.add_option('-a', '--authorization', help='username:password pair to use when connecting.')
 parser.add_option('-u', '--base-url', default='/rest', help='Base path for the REST API.  Defaults to /rest.')
-parser.add_option('-w', '--warn', help='low:high pair of integers to set thresholds for a WARNING status.  Either integer may be absent to indicate no threshold in that direction.')
-parser.add_option('-c', '--crit', help='low:high pair of integers to set thresholds for a CRITICAL status.  Either integer may be absent to indicate no threshold in that direction.')
-parser.add_option('-r', '--regex', help='Regular expression to search for in string values.  Returns CRITICAL if pattern is not found.')
-parser.add_option(      '--invert-regex', action='store_true', help='Reverses the return values for the --regex parameter: CRITICAL if pattern *is* found, OK if it isn\'t.')
-parser.add_option(      '--warn-time', help='low:high pair of timestamps or time periods which constitute WARNING thresholds for DateTime items.  See below for information on formatting.')
-parser.add_option(      '--crit-time', help='low:high pair of timestamps or time periods which constitute CRITICAL thresholds for DateTime items.  See below for information on formatting.')
-parser.add_option('-G', '--group', action='store_true', help='This item is a group; apply the checks to each group member individually.')
+parser.add_option('-G', '--group', action='store_true', help='This item is a group; apply the checks to each group member individually. Cannot be used with --thing.')
 parser.add_option('-U', '--uninitialized-status', choices=('OK', 'WARNING', 'CRITICAL', 'UNKNOWN'), default='UNKNOWN', help='The status that should be returned if the item\'s state is "Uninitialized".  Defaults to UNKNOWN.')
 parser.add_option('-v', '--verbose', action='store_true')
+
+itemOptionsGroup = OptionGroup(parser, "Item Options", "These options will only be used for item and group checks.")
+itemOptionsGroup.add_option('-w', '--warn', help='low:high pair of integers to set thresholds for a WARNING status.  Either integer may be absent to indicate no threshold in that direction. Only used for item/group checks.')
+itemOptionsGroup.add_option('-c', '--crit', help='low:high pair of integers to set thresholds for a CRITICAL status.  Either integer may be absent to indicate no threshold in that direction. Only used for item/group checks.')
+itemOptionsGroup.add_option('-r', '--regex', help='Regular expression to search for in string values.  Returns CRITICAL if pattern is not found. Only used for ')
+itemOptionsGroup.add_option(      '--invert-regex', action='store_true', help='Reverses the return values for the --regex parameter: CRITICAL if pattern *is* found, OK if it isn\'t.')
+itemOptionsGroup.add_option(      '--warn-time', help='low:high pair of timestamps or time periods which constitute WARNING thresholds for DateTime items.  See below for information on formatting.')
+itemOptionsGroup.add_option(      '--crit-time', help='low:high pair of timestamps or time periods which constitute CRITICAL thresholds for DateTime items.  See below for information on formatting.')
+parser.add_option_group(itemOptionsGroup)
 
 iso8601_duration_re = \
     re.compile(r"""^P(?:(?:(\d+)Y)?
@@ -116,10 +120,10 @@ class Thresholds:
                 return (RC_UNKN, 'Numeric thresholds given for non-numeric state: "%s"' % state)
             rc, message = check_limits(state_float, self.crit_low, self.crit_high, name, RC_CRIT)
             if rc is not None:
-                return (rc, message)
+                return (rc, message, perfdata)
             rc, message = check_limits(state_float, self.warn_low, self.warn_high, name, RC_CRIT)
             if rc is not None:
-                return (rc, message)
+                return (rc, message, perfdata)
 
         if self.time_limits:
             try:
@@ -141,15 +145,15 @@ class Thresholds:
             if self.compiled_regex.search(state):
                 return (rc_match, '%s regex matched state: %s' % (name, state))
             else:
-                return (rc_nomatch, '%s regex did not match state: %s' % (name, stat))
+                return (rc_nomatch, '%s regex did not match state: %s' % (name, state))
         return (RC_OK, '%s state within bounds: %s' % (name, state))
 
     
-def check_item(item_json, thresholds, options):
+def check_item(object_json, thresholds, options):
     """Uses the values in OPTIONS to check on the status of ITEM.  Returns a
     tuple: (RETURN_CODE, MESSAGE)"""
     
-    if item_json['state'] in ('Uninitialized', 'Undefined'):
+    if object_json['state'] in ('Uninitialized', 'Undefined'):
         if options.uninitialized_status == 'OK':
             rc = RC_OK
         elif options.uninitialized_status == 'WARNING':
@@ -160,25 +164,39 @@ def check_item(item_json, thresholds, options):
             rc = RC_UNKN
         else:
             rc = RC_UNKN
-        return (rc, '%s is uninitialized.' % item_json['name'])
+        return (rc, '%s is uninitialized.' % object_json['name'])
 
-    return thresholds.check(item_json['state'], item_json['name'])
+    return thresholds.check(object_json['state'], object_json['name'])
+
+def check_thing(object_json, options):
+
+    status = object_json['statusInfo']['status']
+    if status == 'ONLINE':
+        rc = RC_OK
+    elif status == 'UNKONWN':
+        rc = RC_UNKN
+    else:
+        rc = RC_CRIT
+    return (rc, '%s is %s.' % (object_json['UID'], status))
 
 def check_group(group_json, thresholds, options):
     final_rc = RC_OK
     final_messages = []
+    perfdata = ""
     for i in group_json['members']:
         if i['type'] == 'GroupItem':
-            rc, messages = check_group(fetch_item(i['link'], options), thresholds, options)
+            rc, messages, perfdata = check_group(fetch_object(i['link'], options), thresholds, options)
             final_messages += messages
+            perfdata += perfdata
         else:
             rc, message = check_item(i, thresholds, options)
+            perfdata += ("'%s'=%s " % (i["name"], i["state"]))
             if rc != RC_OK:
                 final_messages.append(message)
         final_rc = max(final_rc, rc)
-    return (final_rc, final_messages)
+    return (final_rc, final_messages, perfdata)
 
-def fetch_item(item_url, options):
+def fetch_object(item_url, options):
     if options.verbose:
         print >>sys.stderr, '# %s' % item_url
     
@@ -207,34 +225,50 @@ def fetch_item(item_url, options):
         print 'Exception fetching item data:', e
         sys.exit(RC_UNKN)
     
-    item_json = json.load(item_raw)
+    object_json = json.load(item_raw)
     if options.verbose:
-        print '# %s' % json.dumps(item_json)
-    return item_json
+        print '# %s' % json.dumps(object_json)
+    return object_json
 
 if __name__ == '__main__':
     (options, args) = parser.parse_args()
     thresholds = Thresholds(options)
     
-    if options.item is None:
-        print 'No item given.'
+    if options.item is None and options.thing is None:
+        print 'Item or Thing is mandatory.'
         sys.exit(RC_UNKN)
 
-    item_url = '%s://%s:%d%s/items/%s' % \
-               ('https' if options.ssl else 'http', options.hostname, options.port, options.base_url, options.item)
-    item_json = fetch_item(item_url, options)
+    if options.item is not None and options.thing is not None:
+        print 'Item and Thing cannot be combined.'
+        sys.exit(RC_UNKN)
+
+    if options.thing is not None and options.group is not None:
+        print 'Group functionality can only be used with item checks.'
+        sys.exit(RC_UNKN)
+
+    object_type = 'items' if options.item else 'things'
+    object_name = options.item if options.item else options.thing
+
+    object_url = '%s://%s:%d%s/%s/%s' % \
+               ('https' if options.ssl else 'http', options.hostname, options.port, options.base_url, object_type, object_name)
+    object_json = fetch_object(object_url, options)
 
     if options.group:
-        rc, messages = check_group(item_json, thresholds, options)
+        rc, messages, perfdata = check_group(object_json, thresholds, options)
         if len(messages) == 0:
             final_message = 'All group members within bounds.'
         elif len(messages) == 1:
             final_message = messages[0]
         else:
-            final_message = '%d problems in group %s.\n%s' % (len(messages), item_json['name'], '\n'.join(messages))
-        print final_message
+            final_message = '%d problems in group %s.\n%s' % (len(messages), object_json['name'], '\n'.join(messages))
+        print final_message + '|' + perfdata
         sys.exit(rc)
-    else:
-        rc, message = check_item(item_json, thresholds, options)
+    elif options.item:
+        rc, message = check_item(object_json, thresholds, options)
+        perfdata = ("'%s'=%s" % (object_json["name"], object_json["state"]))
+        print (message + "|" + perfdata)
+        sys.exit(rc)
+    elif options.thing:
+        rc, message = check_thing(object_json, options)
         print message
         sys.exit(rc)
