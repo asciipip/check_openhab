@@ -190,7 +190,13 @@ def check_group(group_json, thresholds, options):
             perfdata += perfdata
         else:
             rc, message = check_item(i, thresholds, options)
-            perfdata += ("'%s'=%s " % (i["name"], i["state"]))
+            try:
+                state_float = float(i["state"])
+                perfdata += ("'%s'=%s " % (i["name"], i["state"]))
+            except:
+                # state isn't numeric, so don't add perfdata
+                pass
+
             if rc != RC_OK:
                 final_messages.append(message)
         final_rc = max(final_rc, rc)
@@ -265,8 +271,15 @@ if __name__ == '__main__':
         sys.exit(rc)
     elif options.item:
         rc, message = check_item(object_json, thresholds, options)
-        perfdata = ("'%s'=%s" % (object_json["name"], object_json["state"]))
-        print (message + "|" + perfdata)
+        perfdata = ""
+        try:
+            state_float = float(i["state"])
+            perfdata = ("|'%s'=%s" % (object_json["name"], object_json["state"]))
+        except:
+            # state isn't numeric, so don't add perfdata
+            pass
+
+        print (message + perfdata)
         sys.exit(rc)
     elif options.thing:
         rc, message = check_thing(object_json, options)
